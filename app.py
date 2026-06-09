@@ -212,7 +212,7 @@ Write a concise executive summary (4-6 sentences) covering:
 
 Plain text only. No headers, no bullets."""
 
-@st.cache_data(show_spinner=False)
+# @st.cache_data(show_spinner=False)  # temporarily disabled for debugging
 def run_gemini_batch(_model_key: str, clusters_json: str) -> tuple[list, list, str]:
     """
     ONE Gemini call: root causes + actions + executive summary combined.
