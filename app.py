@@ -111,9 +111,9 @@ def detect_columns(df: pd.DataFrame):
 
 def filter_noise(df: pd.DataFrame, review_col: str) -> pd.DataFrame:
     NOISE = re.compile(r"^(amazing|perfect|great|loved it|excellent|fantastic|wonderful|5 stars)[!.]?$", re.I)
-    df["is_noise"] = (
-        df[review_col].fillna("").str.strip().str.len() < 15
-    ) | df[review_col].fillna("").str.strip().str.match(NOISE)
+    # Cast to str first to handle numeric/mixed-type columns safely
+    col = df[review_col].astype(str).replace("nan", "").str.strip()
+    df["is_noise"] = (col.str.len() < 15) | col.str.match(NOISE)
     return df
 
 # ── Step 2: AI issue extraction ───────────────────────────────
@@ -475,12 +475,18 @@ def render_issue_card(row, port_avg5):
     </div>""", unsafe_allow_html=True)
 
 # ── SIDEBAR ────────────────────────────────────────────────────
+# Read API key from Streamlit secrets
+try:
+    api_key = st.secrets["GEMINI_API_KEY"]
+except Exception:
+    api_key = None
+
 with st.sidebar:
     st.markdown("### 🏡 Spacez")
     st.markdown("**Review Intelligence System**")
     st.markdown("---")
-    api_key = st.secrets["GEMINI_API_KEY"]
-    st.caption("Get a free key at [aistudio.google.com](https://aistudio.google.com/app/apikey)")
+    if not api_key:
+        st.error("GEMINI_API_KEY not found in Streamlit secrets.")
     uploaded = st.file_uploader("Upload review Excel file", type=["xlsx","xls"])
     run_btn  = st.button("Run analysis", type="primary", use_container_width=True)
     st.markdown("---")
@@ -498,7 +504,7 @@ for key in ["clusters","metrics","total","port_avg","raw_df"]:
 
 if run_btn:
     if not api_key:
-        st.error("Please enter your Gemini API key in the sidebar.")
+        st.error("GEMINI_API_KEY not found. Add it in Streamlit Cloud → Settings → Secrets.")
         st.stop()
     if not uploaded:
         st.error("Please upload a review Excel file.")
@@ -517,13 +523,7 @@ st.markdown("# Review Intelligence")
 st.markdown("Spacez · Guest review analysis powered by Gemini")
 
 if st.session_state.clusters is None:
-    st.info("Enter your **Gemini API key**, upload the review Excel file, then click **Run analysis**.")
-    st.markdown("""
-    **How to get a free Gemini API key:**
-    1. Go to [aistudio.google.com/app/apikey](https://aistudio.google.com/app/apikey)
-    2. Sign in with Google
-    3. Click **Create API key** — it's free
-    """)
+    st.info("Upload the Spacez review Excel file in the sidebar, then click **Run analysis**.")
     st.stop()
 
 clusters  = st.session_state.clusters
