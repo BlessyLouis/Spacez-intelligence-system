@@ -258,18 +258,28 @@ The clusters array must have exactly {len(clusters)} items in the same order as 
 
     try:
         raw = gemini_call(model, combined_prompt, max_tokens=2500)
+
+        # DEBUG
+        st.write("**[DEBUG] RAW GEMINI RESPONSE:**")
+        st.code(raw)
+
         raw = re.sub(r"```json|```", "", raw).strip()
         brace_start = raw.find("{")
         brace_end   = raw.rfind("}") + 1
         if brace_start != -1 and brace_end > brace_start:
             raw = raw[brace_start:brace_end]
+
+        # DEBUG
+        st.write("**[DEBUG] JSON BEING PARSED:**")
+        st.code(raw)
+
         data = json.loads(raw)
         for r in data.get("clusters", []):
             root_causes.append((r.get("root_cause") or "").strip() or None)
             actions.append((r.get("action") or "").strip() or None)
         exec_summary = (data.get("exec_summary") or "").strip()
-    except Exception:
-        pass  # fall through to deterministic defaults below
+    except Exception as _e:
+        st.error(f"**[DEBUG] Gemini call/parse failed:** {type(_e).__name__}: {_e}")
 
     # Deterministic fallbacks — never show empty or keyword strings
     while len(root_causes) < len(clusters):
