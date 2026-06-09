@@ -259,9 +259,6 @@ The clusters array must have exactly {len(clusters)} items in the same order as 
     try:
         raw = gemini_call(model, combined_prompt, max_tokens=2500)
 
-        # DEBUG
-        st.write("**[DEBUG] RAW GEMINI RESPONSE:**")
-        st.code(raw)
 
         raw = re.sub(r"```json|```", "", raw).strip()
         brace_start = raw.find("{")
@@ -269,9 +266,6 @@ The clusters array must have exactly {len(clusters)} items in the same order as 
         if brace_start != -1 and brace_end > brace_start:
             raw = raw[brace_start:brace_end]
 
-        # DEBUG
-        st.write("**[DEBUG] JSON BEING PARSED:**")
-        st.code(raw)
 
         data = json.loads(raw)
         for r in data.get("clusters", []):
@@ -279,7 +273,7 @@ The clusters array must have exactly {len(clusters)} items in the same order as 
             actions.append((r.get("action") or "").strip() or None)
         exec_summary = (data.get("exec_summary") or "").strip()
     except Exception as _e:
-        st.error(f"**[DEBUG] Gemini call/parse failed:** {type(_e).__name__}: {_e}")
+        pass  # Gemini parse failed, fallbacks will be used
 
     # Deterministic fallbacks — never show empty or keyword strings
     while len(root_causes) < len(clusters):
@@ -655,8 +649,8 @@ def run_full_pipeline(api_key: str, file_bytes: bytes, _file_hash: str):
         api_key, json.dumps(clusters_for_gemini)
     )
 
-    clusters["root_cause"]            = root_causes[:len(clusters)]
-    clusters["action_recommendation"] = actions[:len(clusters)]
+    clusters["root_cause"]            = [re.sub(r"<[^>]+>", "", str(v)).strip() for v in root_causes[:len(clusters)]]
+    clusters["action_recommendation"] = [re.sub(r"<[^>]+>", "", str(v)).strip() for v in actions[:len(clusters)]]
 
     # ── Step 6: Business metrics  ─────────────────────────
     metrics = compute_business_metrics(clusters, total_reviews, portfolio_avg)
