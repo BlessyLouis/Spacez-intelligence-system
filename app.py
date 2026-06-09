@@ -257,12 +257,12 @@ Return ONLY this JSON (no markdown, no extra text):
 The clusters array must have exactly {len(clusters)} items in the same order as input."""
 
     root_causes, actions, exec_summary = [], [], ""
+    _gemini_error = None
 
     try:
         raw = gemini_call(model, combined_prompt, max_tokens=2500)
-        # Strip markdown fences
+        raw_original = raw
         raw = re.sub(r"```json|```", "", raw).strip()
-        # Find the outermost { ... } even if there's surrounding text
         brace_start = raw.find("{")
         brace_end   = raw.rfind("}") + 1
         if brace_start != -1 and brace_end > brace_start:
@@ -272,8 +272,8 @@ The clusters array must have exactly {len(clusters)} items in the same order as 
             root_causes.append((r.get("root_cause") or "").strip() or None)
             actions.append((r.get("action") or "").strip() or None)
         exec_summary = (data.get("exec_summary") or "").strip()
-    except Exception:
-        pass  # fall through to deterministic defaults
+    except Exception as _e:
+        _gemini_error = f"{type(_e).__name__}: {_e} | Raw: {repr(locals().get('raw_original','none')[:300])}"
 
     # Deterministic fallbacks — meaningful, not keyword strings
     while len(root_causes) < len(clusters):
@@ -307,7 +307,7 @@ The clusters array must have exactly {len(clusters)} items in the same order as 
             f"Review the Operations tab for detailed root causes and recommended actions."
         )
 
-    return root_causes[:len(clusters)], actions[:len(clusters)], exec_summary
+    return root_causes[:len(clusters)], actions[:len(clusters)], exec_summary, (_gemini_error or '')
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -645,7 +645,7 @@ def run_full_pipeline(api_key: str, file_bytes: bytes, _file_hash: str):
         c["person_level_pattern"] = bool(c["person_level_pattern"])
         c["rating_impact"]      = float(c["rating_impact"])
 
-    root_causes, actions, exec_summary = run_gemini_batch(
+    root_causes, actions, exec_summary, _gemini_debug = run_gemini_batch(
         api_key, json.dumps(clusters_for_gemini)
     )
 
@@ -655,7 +655,7 @@ def run_full_pipeline(api_key: str, file_bytes: bytes, _file_hash: str):
     # ── Step 6: Business metrics  ─────────────────────────
     metrics = compute_business_metrics(clusters, total_reviews, portfolio_avg)
 
-    return clusters, metrics, total_reviews, portfolio_avg, df, exec_summary
+    return clusters, metrics, total_reviews, portfolio_avg, df, exec_summary, _gemini_debug
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -766,7 +766,7 @@ with st.sidebar:
 # ═══════════════════════════════════════════════════════════════
 # SESSION STATE
 # ═══════════════════════════════════════════════════════════════
-for k in ["clusters","metrics","total","port_avg","raw_df","exec_summary"]:
+for k in ["clusters","metrics","total","port_avg","raw_df","exec_summary","_gemini_debug"]:
     if k not in st.session_state:
         st.session_state[k] = None
 
@@ -816,7 +816,7 @@ if run_btn:
         show_steps(3)
 
         result = run_full_pipeline(api_key, file_bytes, fhash)
-        clusters, metrics, total, port_avg, raw_df, exec_summary = result
+        clusters, metrics, total, port_avg, raw_df, exec_summary, _gemini_debug = result
 
         show_steps(4)
         progress_placeholder.empty()
@@ -842,6 +842,7 @@ if run_btn:
     st.session_state.port_avg     = port_avg
     st.session_state.raw_df       = raw_df
     st.session_state.exec_summary = exec_summary
+    st.session_state['_gemini_debug'] = _gemini_debug
     st.rerun()
 
 
@@ -872,6 +873,9 @@ filtered = clusters[
 if exec_summary:
     with st.expander("📋 Executive summary", expanded=True):
         st.markdown(exec_summary)
+        _dbg = st.session_state.get("_gemini_debug","")
+        if _dbg:
+            st.error(f"⚠️ Gemini call failed — showing fallback text. Debug: {_dbg}")
 
 # ── Top metrics row ───────────────────────────────────────────
 c1,c2,c3,c4,c5 = st.columns(5)
