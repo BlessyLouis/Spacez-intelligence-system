@@ -139,19 +139,18 @@ def filter_noise(df: pd.DataFrame, review_col: str) -> pd.DataFrame:
     df["is_noise"] = (col.str.len() < 15) | col.str.match(NOISE)
     return df
 
-# ── Step 2: AI issue extraction ───────────────────────────────
-EXTRACT_PROMPT = """You are an operations intelligence system for Spacez, a luxury villa company.
+# ── Step 2: AI issue extraction (batched) ────────────────────
+BATCH_EXTRACT_PROMPT = """You are an operations intelligence system for Spacez, a luxury villa company.
 
-Analyse this guest review and extract structured operational intelligence.
+Analyse the following guest reviews and extract structured operational intelligence for each.
 
-Review: {review_text}
-Platform: {platform}
-Normalised rating (0-1 scale): {rating}
-Property: {property}
-Caretaker: {caretaker}
+Reviews:
+{reviews_block}
 
-Reply ONLY with valid JSON. No markdown fences, no preamble, no explanation.
+Reply ONLY with a valid JSON array — one object per review, in the same order.
+No markdown fences, no preamble, no explanation.
 
+Each object must follow this exact schema:
 {{
   "has_actionable_issue": true,
   "issues": [
@@ -169,20 +168,27 @@ Reply ONLY with valid JSON. No markdown fences, no preamble, no explanation.
   "noise_review": false
 }}"""
 
-def extract_issues(row, review_col: str, model) -> dict:
-    prompt = EXTRACT_PROMPT.format(
-        review_text=str(row[review_col])[:1200],
-        platform=row.get("platform", "Unknown"),
-        rating=round(float(row.get("normalised_rating", 0.5)), 2),
-        property=row.get("property", row.get("property_name", "Unknown")),
-        caretaker=row.get("caretaker", row.get("caretaker_name", "Unknown")),
-    )
+def extract_issues_batch(rows: list, review_col: str, model) -> list:
+    """Send a batch of rows to Gemini in one call. Returns a list of result dicts."""
+    reviews_block = ""
+    for i, row in enumerate(rows):
+        reviews_block += (
+            f"[{i+1}] Property: {row.get('property', 'Unknown')} | "
+            f"Caretaker: {row.get('caretaker', 'Unknown')} | "
+            f"Platform: {row.get('platform', 'Unknown')} | "
+            f"Rating: {round(float(row.get('normalised_rating', 0.5)), 2)}\n"
+            f"Review: {str(row[review_col])[:600]}\n\n"
+        )
+    prompt = BATCH_EXTRACT_PROMPT.format(reviews_block=reviews_block.strip())
     try:
-        raw = gemini_call(model, prompt, max_tokens=1000)
+        raw = gemini_call(model, prompt, max_tokens=4000)
         raw = re.sub(r"```json|```", "", raw).strip()
-        return json.loads(raw)
+        results = json.loads(raw)
+        if isinstance(results, list):
+            return results
+        return [{"has_actionable_issue": False, "issues": []} for _ in rows]
     except Exception as e:
-        return {"has_actionable_issue": False, "issues": [], "error": str(e)}
+        return [{"has_actionable_issue": False, "issues": [], "error": str(e)} for _ in rows]
 
 # ── Step 3: Pattern detection with evidence ───────────────────
 def detect_patterns(extracted: list) -> pd.DataFrame:
@@ -367,6 +373,52 @@ def compute_business_metrics(clusters: pd.DataFrame, total_reviews: int, portfol
         "rating_impacts": rating_impacts,
     }
 
+# ── Batched root cause + action generation ───────────────────
+BATCH_RC_ACTION_PROMPT = """You are an operations analyst for Spacez luxury villas.
+
+For each issue cluster below, generate:
+1. A specific root cause (1-2 sentences, cite numbers)
+2. A concrete action recommendation (2-3 sentences: who does what, by when, measurable outcome)
+
+Clusters:
+{clusters_block}
+
+Reply ONLY with a JSON array in the same order, each object:
+{{"root_cause": "...", "action": "..."}}
+No markdown, no preamble."""
+
+def generate_root_causes_and_actions_batch(clusters_df, model) -> tuple:
+    import time as _time
+    BATCH = 10
+    all_rc, all_ac = [], []
+    rows = clusters_df.to_dict("records")
+    for start in range(0, len(rows), BATCH):
+        batch = rows[start: start + BATCH]
+        block = ""
+        for i, r in enumerate(batch):
+            block += (
+                f"[{i+1}] {r['category']} at {r['property']} | "
+                f"Freq: {r['frequency']} | Priority: {r.get('priority','?')} | "
+                f"Owner: {r['owner']} | Caretaker: {r['caretaker']} | "
+                f"Recurring: {r['is_recurring']} | Person-pattern: {r.get('person_level_pattern',False)}\n"
+                f"Descriptions: {'; '.join(r.get('descriptions',[])[:2])}\n\n"
+            )
+        prompt = BATCH_RC_ACTION_PROMPT.format(clusters_block=block.strip())
+        try:
+            raw = gemini_call(model, prompt, max_tokens=3000)
+            raw = re.sub(r"```json|```", "", raw).strip()
+            results = json.loads(raw)
+            for j, res in enumerate(results):
+                all_rc.append(res.get("root_cause", batch[j].get("likely_cause", "Pattern detected.")))
+                all_ac.append(res.get("action", "Review and address the recurring issue."))
+        except Exception:
+            for r in batch:
+                all_rc.append(r.get("likely_cause", "Pattern detected across multiple reviews."))
+                all_ac.append("Review and address the recurring issue with the relevant owner.")
+        if start + BATCH < len(rows):
+            _time.sleep(3)
+    return all_rc, all_ac
+
 # ── Main pipeline ─────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
 def run_full_pipeline(_api_key: str, file_bytes: bytes, filename: str):
@@ -383,15 +435,27 @@ def run_full_pipeline(_api_key: str, file_bytes: bytes, filename: str):
     portfolio_avg = df["normalised_rating"].dropna().mean()
 
     import time as _time
+    BATCH_SIZE = 8  # 8 reviews per call => ~6 calls for 50 reviews, well within free tier
+    rows_list = []
+    for _, row in actionable.iterrows():
+        r = row.to_dict()
+        r["property"]          = str(row.get(property_col, "Unknown")) if property_col else "Unknown"
+        r["caretaker"]         = str(row.get(caretaker_col, "Unknown")) if caretaker_col else "Unknown"
+        r["normalised_rating"] = float(row.get("normalised_rating", 0.5))
+        rows_list.append(r)
+
     extracted = []
-    for i, row in actionable.iterrows():
-        result = extract_issues(row, review_col, model)
-        result["review_text"]       = str(row[review_col])[:300]
-        result["property"]          = str(row.get(property_col, "Unknown")) if property_col else "Unknown"
-        result["caretaker"]         = str(row.get(caretaker_col, "Unknown")) if caretaker_col else "Unknown"
-        result["normalised_rating"] = float(row.get("normalised_rating", 0.5))
-        extracted.append(result)
-        _time.sleep(1.5)  # stay within free tier rate limits
+    for batch_start in range(0, len(rows_list), BATCH_SIZE):
+        batch = rows_list[batch_start: batch_start + BATCH_SIZE]
+        results = extract_issues_batch(batch, review_col, model)
+        for row, result in zip(batch, results):
+            result["review_text"]       = str(row[review_col])[:300]
+            result["property"]          = row["property"]
+            result["caretaker"]         = row["caretaker"]
+            result["normalised_rating"] = row["normalised_rating"]
+            extracted.append(result)
+        if batch_start + BATCH_SIZE < len(rows_list):
+            _time.sleep(3)  # brief pause between batches
 
     issues_df = detect_patterns(extracted)
     if issues_df.empty:
@@ -410,18 +474,8 @@ def run_full_pipeline(_api_key: str, file_bytes: bytes, filename: str):
     clusters["priority"]        = clusters["priority_score"].apply(priority_label)
     clusters["confidence"]      = clusters.apply(lambda r: compute_confidence(r, total_reviews), axis=1)
 
-    root_causes, actions = [], []
-    for idx, row in clusters.iterrows():
-        rc = generate_root_cause(row.to_dict(), model)
-        ac = generate_action({
-            "category": row["category"], "property": row["property"],
-            "frequency": row["frequency"], "root_cause": rc,
-            "owner": row["owner"], "priority": row["priority"],
-            "controllable": row["caretaker_controllable"],
-            "person_level": row.get("person_level_pattern", False),
-        }, model)
-        root_causes.append(rc)
-        actions.append(ac)
+    # Batch root-cause + action generation: all clusters in one call
+    root_causes, actions = generate_root_causes_and_actions_batch(clusters, model)
 
     clusters["root_cause"]            = root_causes
     clusters["action_recommendation"] = actions
