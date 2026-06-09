@@ -75,16 +75,23 @@ SEVERITY_SCORE = {"High": 3, "Medium": 2, "Low": 1}
 OWNER_URGENCY  = {"Operations": 1.2, "Caretaker": 1.1, "Business": 1.0, "Vendor": 0.9, "Unknown": 0.8}
 
 # ── Gemini client helper ──────────────────────────────────────
-def get_model(api_key: str, model_name: str = "gemini-1.5-flash"):
+def get_model(api_key: str, model_name: str = "gemini-2.0-flash"):
     genai.configure(api_key=api_key)
     return genai.GenerativeModel(model_name)
 
 def gemini_call(model, prompt: str, max_tokens: int = 1000) -> str:
-    response = model.generate_content(
-        prompt,
-        generation_config=genai.GenerationConfig(max_output_tokens=max_tokens, temperature=0.2)
-    )
-    return response.text.strip()
+    try:
+        response = model.generate_content(
+            prompt,
+            generation_config=genai.GenerationConfig(max_output_tokens=max_tokens, temperature=0.2)
+        )
+        return response.text.strip()
+    except Exception as e:
+        err = str(e)
+        if "403" in err or "API_KEY_INVALID" in err or "permission" in err.lower():
+            st.error(f"Gemini API key error (403): {err}\n\nCheck your GEMINI_API_KEY secret is correct and the Gemini API is enabled at console.cloud.google.com")
+            st.stop()
+        raise
 
 # ── Step 1: Load & normalise ──────────────────────────────────
 def load_reviews(uploaded_file) -> pd.DataFrame:
