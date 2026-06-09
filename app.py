@@ -684,62 +684,144 @@ def strip_html(text: str) -> str:
     return re.sub(r"<[^>]+>", "", str(text)).strip()
 
 def render_issue_card(row, port_avg5):
-    p   = row["priority"]
+    """
+    Clean Streamlit-native issue card.
+    Replaces the large HTML block.
+    """
+
     evs = row.get("evidence_reviews", [])
 
-    ev_html = "".join(
-        f'<div class="evidence-quote">"{str(ev).strip()[:180]}{"…" if len(str(ev).strip())>180 else ""}"</div>'
-        for ev in evs[:3] if ev and len(str(ev).strip()) > 10
+    rating5 = round(row["avg_rating_normalised"] * 5, 1)
+    impact5 = round(row["rating_impact"] * 5, 1)
+
+    impact_str = (
+        f"-{impact5}/5"
+        if impact5 > 0
+        else f"+{abs(impact5)}/5"
     )
-    person_badge = (
-        '<span class="badge badge-person">⚠ person-level pattern</span>'
-        if row.get("person_level_pattern") else ""
-    )
-    rating5    = round(row["avg_rating_normalised"] * 5, 1)
-    impact5    = round(row["rating_impact"] * 5, 1)
-    impact_str = f"−{impact5}" if impact5 > 0 else f"+{abs(impact5)}"
 
-    explain_html = f"""
-    <div class="explain-row">
-        <span class="explain-step">Detected:</span>
-        <span class="explain-text">{row['frequency']} reviews matched keywords for {row['category']} at {row['property']}</span>
-    </div>
-    <div class="explain-row">
-        <span class="explain-step">Priority:</span>
-        <span class="explain-text">{p} — freq {row['frequency']} × severity {row['severity']} × rating impact {impact_str}/5</span>
-    </div>
-    <div class="explain-row">
-        <span class="explain-step">Owner:</span>
-        <span class="explain-text">{row['owner']} — {'caretaker-controllable' if row['caretaker_controllable'] else 'outside caretaker control'}</span>
-    </div>
-    <div class="explain-row">
-        <span class="explain-step">Method:</span>
-        <span class="explain-text">Keyword match: {', '.join(row.get('matched_keywords', [])[:4]) or 'pattern detection'}</span>
-    </div>"""
+    with st.container(border=True):
 
-    st.markdown(f"""
-    <div class="issue-card {p.lower()}">
-        <div class="issue-title">{row['category']} · {row['property']}</div>
-        <div class="issue-meta">
-            {priority_badge(p)} {owner_badge(row['owner'])} {person_badge}
-            &nbsp;·&nbsp; {row['frequency']} reviews &nbsp;·&nbsp; Confidence {row['confidence']}%
-            &nbsp;·&nbsp; Avg rating {rating5}/5 (portfolio {port_avg5}/5)
-            &nbsp;·&nbsp; Rating impact <b>{impact_str}/5</b>
-        </div>
+        # Header
+        st.subheader(
+            f"{row['category']} • {row['property']}"
+        )
 
-        <div class="section-label">Root cause</div>
-        <div style="font-size:.85rem;color:#3A3730;margin-bottom:.8rem">{strip_html(row['root_cause'])}</div>
+        # KPI Row
+        c1, c2, c3, c4 = st.columns(4)
 
-        <div class="section-label">Evidence reviews ({min(len(evs),3)} shown)</div>
-        <div class="evidence-box">{ev_html or '<span style="font-size:.8rem;color:#8B8578">No direct quotes stored.</span>'}</div>
+        with c1:
+            st.metric(
+                "Reviews",
+                row["frequency"]
+            )
 
-        <div class="section-label" style="margin-top:.8rem">Recommended action</div>
-        <div style="font-size:.85rem;color:#1A1915;font-weight:500;margin-bottom:.8rem">{strip_html(row['action_recommendation'])}</div>
+        with c2:
+            st.metric(
+                "Confidence",
+                f"{row['confidence']}%"
+            )
 
-        <div class="section-label">Explainability</div>
-        {explain_html}
-    </div>""", unsafe_allow_html=True)
+        with c3:
+            st.metric(
+                "Priority",
+                row["priority"]
+            )
 
+        with c4:
+            st.metric(
+                "Rating Impact",
+                impact_str
+            )
+
+        st.divider()
+
+        # Operational Insight
+        st.markdown("### Operational Insight")
+
+        st.info(
+            f"""
+            {row['frequency']} guest review(s) identified
+            {row['category'].lower()} concerns at
+            {row['property']}.
+
+            Caretaker: {row['caretaker']}
+
+            Average Rating: {rating5}/5
+
+            Portfolio Average: {port_avg5}/5
+
+            This pattern has appeared across multiple guest stays
+            and should be reviewed by {row['owner']}.
+            """
+        )
+
+        # Evidence
+        st.markdown("### Evidence Reviews")
+
+        if evs:
+            for review in evs[:3]:
+                st.markdown(
+                    f"""
+                    > {review}
+                    """
+                )
+        else:
+            st.caption("No evidence reviews available.")
+
+        st.divider()
+
+        # Recommendation
+        st.markdown("### Recommended Action")
+
+        st.success(
+            row["action_recommendation"]
+        )
+
+        st.divider()
+
+        # Explainability
+        st.markdown("### Explainability")
+
+        exp1, exp2 = st.columns(2)
+
+        with exp1:
+            st.write(
+                f"**Owner:** {row['owner']}"
+            )
+            st.write(
+                f"**Caretaker:** {row['caretaker']}"
+            )
+            st.write(
+                f"**Priority:** {row['priority']}"
+            )
+
+        with exp2:
+            st.write(
+                f"**Confidence:** {row['confidence']}%"
+            )
+            st.write(
+                f"**Frequency:** {row['frequency']} reviews"
+            )
+            st.write(
+                f"**Severity:** {row['severity']}"
+            )
+
+        keywords = row.get("matched_keywords", [])
+
+        if keywords:
+            st.write(
+                f"**Matched Keywords:** {', '.join(keywords)}"
+            )
+
+        if row.get("person_level_pattern"):
+            st.warning(
+                "⚠ Recurring caretaker/person-level pattern detected."
+            )
+
+        st.caption(
+            f"Detection Method: Keyword matching + rule-based clustering"
+        )
 
 # ═══════════════════════════════════════════════════════════════
 # SIDEBAR
@@ -898,6 +980,47 @@ tab_ops, tab_biz, tab_care, tab_copilot = st.tabs([
 # OPERATIONS TAB
 # ═══════════════════════════════════════════════════════════════
 with tab_ops:
+    st.subheader("Operations Overview")
+    
+    m1, m2, m3, m4, m5, m6 = st.columns(6)
+    
+    with m1:
+        st.metric(
+            "Issues",
+            metrics["total_issues"]
+        )
+    
+    with m2:
+        st.metric(
+            "High Priority",
+            metrics["high_count"]
+        )
+    
+    with m3:
+        st.metric(
+            "Recurring",
+            metrics["recurring_count"]
+        )
+    
+    with m4:
+        st.metric(
+            "Properties",
+            filtered["property"].nunique()
+        )
+    
+    with m5:
+        st.metric(
+            "Caretakers",
+            filtered["caretaker"].nunique()
+        )
+    
+    with m6:
+        st.metric(
+            "Portfolio Avg",
+            f"{port_avg5}/5"
+        )
+    
+    st.divider()
     st.subheader("Operations issue queue")
 
     col1, col2 = st.columns([2,1])
