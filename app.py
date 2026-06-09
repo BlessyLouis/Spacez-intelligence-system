@@ -241,8 +241,8 @@ def run_gemini_batch(_model_key: str, clusters_json: str) -> tuple[list, list, s
     actions = []
     try:
         raw = gemini_call(model, BATCH_INSIGHTS_PROMPT.format(clusters_block=block.strip()))
-	st.write("RAW GEMINI RESPONSE")
-	st.code(raw)
+		st.write("RAW GEMINI RESPONSE")
+		st.code(raw)
         # Strip markdown fences, find the JSON array robustly
         raw = re.sub(r"```json|```", "", raw).strip()
         # Extract the JSON array even if there's surrounding text
