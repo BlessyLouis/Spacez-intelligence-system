@@ -479,7 +479,7 @@ with st.sidebar:
     st.markdown("### 🏡 Spacez")
     st.markdown("**Review Intelligence System**")
     st.markdown("---")
-    api_key  = st.text_input("Google Gemini API key", type="password", placeholder="AIza…")
+    api_key = st.secrets["GEMINI_API_KEY"]
     st.caption("Get a free key at [aistudio.google.com](https://aistudio.google.com/app/apikey)")
     uploaded = st.file_uploader("Upload review Excel file", type=["xlsx","xls"])
     run_btn  = st.button("Run analysis", type="primary", use_container_width=True)
