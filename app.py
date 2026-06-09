@@ -1,10 +1,12 @@
 """
 Spacez · AI Review Intelligence System
 ────────────────────────────────────────
-Architecture:
-  100 % Pure Python / Pandas  — issue detection, classification, pattern detection,
-                                operational insights, recommendations, business metrics
-    Gemini (optional)         — executive summary only
+Architecture (Req 8):
+  90 %  Pure Python / Pandas  — column detection, normalisation, noise filter,
+                                keyword classification, pattern detection,
+                                priority scoring, confidence, business metrics
+  10 %  Gemini (one batch)    — root cause + action per issue cluster
+                              — executive summary
                               — copilot Q&A
 """
 
@@ -183,71 +185,20 @@ def gemini_call(model, prompt: str, max_tokens: int = 3000) -> str:
     raise last_err
 
 
-# ═══════════════════════════════════════════════════════════════
-# DETERMINISTIC OPERATIONAL INSIGHTS  (no Gemini)
-# ═══════════════════════════════════════════════════════════════
+# ── Req 2 + 3: Single batch prompt for ALL clusters ───────────
+BATCH_INSIGHTS_PROMPT = """You are an operations analyst for Spacez, a luxury villa company.
 
-# Category → recommended action map
-ACTION_MAP = {
-    "Cleanliness":        "Operations team to inspect pool maintenance logs at {property}, verify cleaning schedule with caretaker {caretaker}, and confirm corrective action within 48 hours. Target: zero pool complaints over the next 30 days.",
-    "Housekeeping":       "Housekeeping team to audit room cleaning processes at {property} with caretaker {caretaker}, complete corrective training where required, and re-inspect within 48 hours.",
-    "Check-in":           "Caretaker {caretaker} to review arrival coordination procedures at {property}, implement a guest arrival tracking checklist, and ensure on-time check-ins within 48 hours.",
-    "Communication":      "Caretaker {caretaker} to review response-time standards at {property} and ensure all guest inquiries are acknowledged within 30 minutes. Operations to audit message logs weekly.",
-    "Maintenance":        "Operations team to inspect equipment at {property}, validate functionality, log all faults, and complete repairs within 48 hours. Caretaker {caretaker} to confirm resolution.",
-    "Amenities":          "Operations team to inspect amenity availability at {property}, resolve connectivity or equipment gaps with caretaker {caretaker}, and monitor service stability for 7 days.",
-    "Safety":             "Operations team to conduct an immediate safety inspection at {property}, resolve all hazards within 24 hours, and brief caretaker {caretaker} on updated safety protocols.",
-    "Staff Behaviour":    "Operations to review guest feedback regarding caretaker {caretaker} at {property}, conduct a coaching session within 48 hours, and monitor subsequent reviews.",
-    "Misleading Listing": "Marketing team to review listing content for {property}, update inaccurate images or descriptions within 48 hours, and confirm changes with the business owner.",
-    "Other":              "Operations team to review complaints at {property} with caretaker {caretaker}, identify root cause, and implement corrective action within 48 hours.",
-}
-DEFAULT_ACTION = "Operations team to review recurring complaints at {property} with caretaker {caretaker}, identify ownership, and implement corrective action within 48 hours."
+For each issue cluster below, write:
+1. root_cause   — 1-2 sentences citing exact numbers and names from the data
+2. action       — 2-3 concrete sentences: who does what, by when, measurable outcome
 
+Issue clusters:
+{clusters_block}
 
-def generate_operational_insight(row) -> str:
-    """Fully deterministic operational insight from cluster data. No AI."""
-    freq      = row["frequency"]
-    category  = row["category"]
-    prop      = row["property"]
-    caretaker = row["caretaker"]
-    rating5   = round(row["avg_rating_normalised"] * 5, 1)
-    impact5   = round(row["rating_impact"] * 5, 1)
-    impact_str = f"-{impact5}/5" if impact5 > 0 else f"+{abs(impact5)}/5"
-    recurring  = row.get("is_recurring", False)
-    person_pat = row.get("person_level_pattern", False)
+Reply ONLY as a JSON array (same order as clusters), each object:
+{{"root_cause": "...", "action": "..."}}
+No markdown, no preamble."""
 
-    context = ""
-    if recurring:
-        context += " This is a recurring issue with 3 or more mentions."
-    if person_pat:
-        context += f" Caretaker {caretaker} shows this pattern across multiple properties."
-
-    lines = [
-        f"{freq} guest review{'s' if freq != 1 else ''} identified {category.lower()} concerns at {prop}.",
-        "",
-        f"Average Rating: {rating5}/5",
-        f"Rating Impact: {impact_str}",
-        f"Caretaker: {caretaker}",
-        "",
-        (
-            f"This pattern has appeared across {freq} guest stay{'s' if freq != 1 else ''} "
-            f"and is associated with below-average satisfaction.{context} "
-            f"Review is required by {row['owner']}."
-        ),
-    ]
-    return "\n".join(lines)
-
-
-def generate_recommendation(row) -> str:
-    """Deterministic recommendation from ACTION_MAP. No AI."""
-    template = ACTION_MAP.get(row["category"], DEFAULT_ACTION)
-    return template.format(
-        property=row["property"],
-        caretaker=row["caretaker"],
-        owner=row["owner"],
-    )
-
-
-# ─── Executive summary (Gemini — one call, optional) ─────────
 EXECUTIVE_SUMMARY_PROMPT = """You are a senior hospitality consultant reviewing Spacez villa performance.
 
 Portfolio data:
@@ -261,18 +212,106 @@ Write a concise executive summary (4-6 sentences) covering:
 
 Plain text only. No headers, no bullets."""
 
+# @st.cache_data(show_spinner=False)  # temporarily disabled for debugging
+def run_gemini_batch(_model_key: str, clusters_json: str) -> tuple[list, list, str]:
+    """
+    ONE Gemini call: root causes + actions + executive summary combined.
+    Cached by api_key + clusters_json — same data never re-triggers Gemini.
+    """
+    model    = get_model(_model_key)
+    clusters = json.loads(clusters_json)
 
-@st.cache_data(show_spinner=False)
-def generate_exec_summary(_model_key: str, summary: str) -> str:
-    """Single Gemini call for exec summary only. Cached."""
+    # Build compact cluster block
+    block = ""
+    for i, c in enumerate(clusters):
+        block += (
+            f"[{i+1}] {c['category']} at {c['property']} | "
+            f"Freq:{c['frequency']} | {c.get('priority','?')} priority | "
+            f"Owner:{c['owner']} | Caretaker:{c['caretaker']} | "
+            f"Recurring:{c['is_recurring']}\n"
+            f"Reviews: {'; '.join(c.get('descriptions',[])[:2])}\n"
+        )
+
+    high_count = sum(1 for c in clusters if c.get("priority") == "High")
+    props      = list({c["property"] for c in clusters})
+    avg_rating = round(
+        sum(c.get("avg_rating_normalised", 0.5) for c in clusters) / max(len(clusters), 1) * 5, 1
+    )
+
+    combined_prompt = f"""You are an operations analyst for Spacez luxury villas.
+
+Issue clusters from guest reviews:
+{block.strip()}
+
+Portfolio: {len(clusters)} clusters across {len(props)} properties, avg rating {avg_rating}/5, {high_count} high-priority.
+
+Return ONLY this JSON (no markdown, no extra text):
+{{
+  "clusters": [
+    {{"root_cause": "1-2 sentences with specific numbers and names", "action": "concrete: who does what by when"}}
+  ],
+  "exec_summary": "4-5 sentences: portfolio health, top risks, this week priorities"
+}}
+The clusters array must have exactly {len(clusters)} items in the same order as input."""
+
+    root_causes, actions, exec_summary = [], [], ""
+
     try:
-        model = get_model(_model_key)
-        result = gemini_call(model, EXECUTIVE_SUMMARY_PROMPT.format(summary=summary), max_tokens=500)
-        if result and len(result) > 40:
-            return result
-    except Exception:
-        pass
-    return ""
+        raw = gemini_call(model, combined_prompt, max_tokens=2500)
+
+        # DEBUG
+        st.write("**[DEBUG] RAW GEMINI RESPONSE:**")
+        st.code(raw)
+
+        raw = re.sub(r"```json|```", "", raw).strip()
+        brace_start = raw.find("{")
+        brace_end   = raw.rfind("}") + 1
+        if brace_start != -1 and brace_end > brace_start:
+            raw = raw[brace_start:brace_end]
+
+        # DEBUG
+        st.write("**[DEBUG] JSON BEING PARSED:**")
+        st.code(raw)
+
+        data = json.loads(raw)
+        for r in data.get("clusters", []):
+            root_causes.append((r.get("root_cause") or "").strip() or None)
+            actions.append((r.get("action") or "").strip() or None)
+        exec_summary = (data.get("exec_summary") or "").strip()
+    except Exception as _e:
+        st.error(f"**[DEBUG] Gemini call/parse failed:** {type(_e).__name__}: {_e}")
+
+    # Deterministic fallbacks — never show empty or keyword strings
+    while len(root_causes) < len(clusters):
+        root_causes.append(None)
+    while len(actions) < len(clusters):
+        actions.append(None)
+
+    for i, c in enumerate(clusters):
+        if not root_causes[i]:
+            root_causes[i] = (
+                f"{c['frequency']} guest review(s) at {c['property']} flagged "
+                f"{c['category'].lower()} as an issue. Assigned caretaker: {c['caretaker']}."
+            )
+        if not actions[i]:
+            actions[i] = (
+                f"{c['owner']} team to inspect {c['category'].lower()} at {c['property']} "
+                f"within 48 hours, brief caretaker {c['caretaker']} on corrective steps, "
+                f"and confirm resolution in the ops log."
+            )
+
+    if not exec_summary or len(exec_summary) < 40:
+        top = clusters[0] if clusters else {}
+        exec_summary = (
+            f"Portfolio analysis across {len(props)} propert{'y' if len(props)==1 else 'ies'} "
+            f"found {len(clusters)} issue cluster{'s' if len(clusters)!=1 else ''} "
+            f"(avg rating {avg_rating}/5, {high_count} high priority). "
+            f"Most frequent: {top.get('category','—')} at {top.get('property','—')} "
+            f"({top.get('frequency',0)} mentions, caretaker {top.get('caretaker','—')}). "
+            f"Immediate action required on all high-priority caretaker-controllable clusters."
+        )
+
+    return root_causes[:len(clusters)], actions[:len(clusters)], exec_summary
 
 
 
@@ -600,25 +639,24 @@ def run_full_pipeline(api_key: str, file_bytes: bytes, _file_hash: str):
     clusters["priority"]       = clusters["priority_score"].apply(priority_label)
     clusters["confidence"]     = clusters.apply(lambda r: compute_confidence(r, total_reviews), axis=1)
 
-    # ── Step 5: Deterministic insights + recommendations (no Gemini) ─
-    clusters["operational_insight"]   = clusters.apply(generate_operational_insight, axis=1)
-    clusters["action_recommendation"] = clusters.apply(generate_recommendation, axis=1)
+    # ── Step 5 (Gemini): ONE batch call for all clusters  ─
+    clusters_for_gemini = clusters[
+        ["category","property","frequency","priority","owner",
+         "caretaker","is_recurring","person_level_pattern",
+         "descriptions","avg_rating_normalised","rating_impact","likely_cause"]
+    ].to_dict("records")
+    # Convert numpy booleans to Python booleans for JSON serialisation
+    for c in clusters_for_gemini:
+        c["is_recurring"]       = bool(c["is_recurring"])
+        c["person_level_pattern"] = bool(c["person_level_pattern"])
+        c["rating_impact"]      = float(c["rating_impact"])
 
-    # ── Step 5b: Executive summary (single Gemini call, optional) ──
-    summary_lines = "\n".join(
-        f"- {r['category']} at {r['property']}: {r['frequency']} reviews, "
-        f"{r['priority']} priority, rating impact {round(r['rating_impact']*5,1)}/5, "
-        f"caretaker {r['caretaker']}"
-        for _, r in clusters.iterrows()
+    root_causes, actions, exec_summary = run_gemini_batch(
+        api_key, json.dumps(clusters_for_gemini)
     )
-    high_cnt  = int((clusters["priority"] == "High").sum())
-    props_cnt = clusters["property"].nunique()
-    avg_r5    = round(portfolio_avg * 5, 1)
-    full_summary = (
-        f"Portfolio: {total_reviews} reviews, {props_cnt} properties, avg rating {avg_r5}/5, "
-        f"{high_cnt} high-priority clusters.\n{summary_lines}"
-    )
-    exec_summary = generate_exec_summary(api_key, full_summary)
+
+    clusters["root_cause"]            = root_causes[:len(clusters)]
+    clusters["action_recommendation"] = actions[:len(clusters)]
 
     # ── Step 6: Business metrics  ─────────────────────────
     metrics = compute_business_metrics(clusters, total_reviews, portfolio_avg)
@@ -691,8 +729,8 @@ def render_issue_card(row, port_avg5):
             &nbsp;·&nbsp; Rating impact <b>{impact_str}/5</b>
         </div>
 
-        <div class="section-label">Operational Insight</div>
-        <div style="font-size:.85rem;color:#3A3730;margin-bottom:.8rem;white-space:pre-line">{row['operational_insight']}</div>
+        <div class="section-label">Root cause</div>
+        <div style="font-size:.85rem;color:#3A3730;margin-bottom:.8rem">{row['root_cause']}</div>
 
         <div class="section-label">Evidence reviews ({min(len(evs),3)} shown)</div>
         <div class="evidence-box">{ev_html or '<span style="font-size:.8rem;color:#8B8578">No direct quotes stored.</span>'}</div>
@@ -756,11 +794,11 @@ if run_btn:
     # Step-by-step progress display (Req 5)
     progress_placeholder = st.empty()
     steps = [
-        ("Loading & normalising reviews",      "🔄"),
-        ("Detecting issues (keyword engine)",  "🔍"),
-        ("Finding patterns & clusters",        "📊"),
-        ("Generating operational insights",    "💡"),
-        ("Building dashboard",                 "✅"),
+        ("Loading & normalising reviews",     "🔄"),
+        ("Detecting issues (keyword engine)", "🔍"),
+        ("Finding patterns & clusters",       "📊"),
+        ("Generating AI insights (Gemini)",   "🤖"),
+        ("Building dashboard",                "✅"),
     ]
 
     def show_steps(active: int):
@@ -817,7 +855,7 @@ if run_btn:
 # MAIN CONTENT
 # ═══════════════════════════════════════════════════════════════
 st.markdown("# Review Intelligence")
-st.markdown("Spacez · Guest review analysis · Operational intelligence dashboard")
+st.markdown("Spacez · Guest review analysis powered by Gemini")
 
 if st.session_state.clusters is None:
     st.info("Upload the Spacez review Excel file in the sidebar, then click **▶ Run analysis**.")
@@ -840,21 +878,6 @@ filtered = clusters[
 if exec_summary:
     with st.expander("📋 Executive summary", expanded=True):
         st.markdown(exec_summary)
-else:
-    with st.expander("📋 Portfolio summary", expanded=True):
-        high_c = metrics.get("high_count", 0)
-        med_c  = metrics.get("med_count", 0)
-        rec_c  = metrics.get("recurring_count", 0)
-        props  = clusters["property"].nunique()
-        top_r  = clusters.sort_values("priority_score", ascending=False).iloc[0]
-        st.markdown(
-            f"**{total_rev} reviews** analysed across **{props} properties** · "
-            f"Avg rating **{port_avg5}/5** · "
-            f"**{high_c} high-priority** and **{med_c} medium-priority** issue clusters detected. "
-            f"**{rec_c} recurring issues** require attention. "
-            f"Most critical: **{top_r['category']}** at **{top_r['property']}** "
-            f"({top_r['frequency']} mentions, caretaker {top_r['caretaker']})."
-        )
 
 # ── Top metrics row ───────────────────────────────────────────
 c1,c2,c3,c4,c5 = st.columns(5)
@@ -1036,7 +1059,7 @@ with tab_care:
                             </div>
                             <div class="evidence-quote" style="font-size:.8rem">"{ev1}"</div>
                             <div style="font-size:.8rem;margin-top:.5rem;color:#3A3730">
-                                <b>Action:</b> {ir['action_recommendation']}
+                                <b>Coaching note:</b> {ir['action_recommendation']}
                             </div>
                         </div>""", unsafe_allow_html=True)
                 else:
@@ -1052,9 +1075,9 @@ with tab_copilot:
 
     summary_str = clusters.to_string(
         columns=["property","category","priority","frequency","confidence",
-                 "owner","operational_insight","rating_impact","person_level_pattern",
+                 "owner","root_cause","rating_impact","person_level_pattern",
                  "action_recommendation"],
-        index=False, max_colwidth=120
+        index=False, max_colwidth=100
     )
     COPILOT_SYS = f"""You are the Spacez Operations Copilot. Answer questions about guest review analysis.
 Always cite specific numbers, property names, and caretaker names from the data.
