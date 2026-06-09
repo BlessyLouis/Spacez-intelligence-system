@@ -685,6 +685,10 @@ def render_metric(label, value, delta=None):
         {delta_html}
     </div>""", unsafe_allow_html=True)
 
+def strip_html(text: str) -> str:
+    """Remove any HTML tags from a string (in case fields got stored with HTML markup)."""
+    return re.sub(r"<[^>]+>", "", str(text)).strip()
+
 def render_issue_card(row, port_avg5):
     p   = row["priority"]
     evs = row.get("evidence_reviews", [])
@@ -730,13 +734,13 @@ def render_issue_card(row, port_avg5):
         </div>
 
         <div class="section-label">Root cause</div>
-        <div style="font-size:.85rem;color:#3A3730;margin-bottom:.8rem">{row['root_cause']}</div>
+        <div style="font-size:.85rem;color:#3A3730;margin-bottom:.8rem">{strip_html(row['root_cause'])}</div>
 
         <div class="section-label">Evidence reviews ({min(len(evs),3)} shown)</div>
         <div class="evidence-box">{ev_html or '<span style="font-size:.8rem;color:#8B8578">No direct quotes stored.</span>'}</div>
 
         <div class="section-label" style="margin-top:.8rem">Recommended action</div>
-        <div style="font-size:.85rem;color:#1A1915;font-weight:500;margin-bottom:.8rem">{row['action_recommendation']}</div>
+        <div style="font-size:.85rem;color:#1A1915;font-weight:500;margin-bottom:.8rem">{strip_html(row['action_recommendation'])}</div>
 
         <div class="section-label">Explainability</div>
         {explain_html}
@@ -1059,7 +1063,7 @@ with tab_care:
                             </div>
                             <div class="evidence-quote" style="font-size:.8rem">"{ev1}"</div>
                             <div style="font-size:.8rem;margin-top:.5rem;color:#3A3730">
-                                <b>Coaching note:</b> {ir['action_recommendation']}
+                                <b>Coaching note:</b> {strip_html(ir['action_recommendation'])}
                             </div>
                         </div>""", unsafe_allow_html=True)
                 else:
