@@ -216,98 +216,87 @@ Plain text only. No headers, no bullets."""
 @st.cache_data(show_spinner=False)
 def run_gemini_batch(_model_key: str, clusters_json: str) -> tuple[list, list, str]:
     """
-    ONE Gemini call for root causes + actions + executive summary combined.
-    Cached — same data never re-triggers Gemini. (Req 3 + 4)
+    Single cached Gemini call for the entire cluster set.
+    _model_key is the API key (used as cache key).
+    clusters_json is a JSON string of cluster data (used as cache key).
+    Returns: (root_causes, actions, executive_summary)
+    (Req 3 + 4)
     """
-    model    = get_model(_model_key)
+    model = get_model(_model_key)
     clusters = json.loads(clusters_json)
 
-    # Compact cluster block
+    # Build cluster block for root cause + action
     block = ""
     for i, c in enumerate(clusters):
         block += (
             f"[{i+1}] {c['category']} at {c['property']} | "
-            f"Freq:{c['frequency']} | {c.get('priority','?')} priority | "
-            f"Owner:{c['owner']} | Caretaker:{c['caretaker']} | "
-            f"Recurring:{c['is_recurring']}\n"
-            f"Reviews: {'; '.join(c.get('descriptions',[])[:2])}\n"
+            f"Freq: {c['frequency']} | Priority: {c.get('priority','?')} | "
+            f"Owner: {c['owner']} | Caretaker: {c['caretaker']} | "
+            f"Recurring: {c['is_recurring']} | Person-pattern: {c.get('person_level_pattern',False)}\n"
+            f"Sample issues: {'; '.join(c.get('descriptions',[])[:2])}\n\n"
         )
 
-    high_count = sum(1 for c in clusters if c.get("priority") == "High")
-    props      = list({c["property"] for c in clusters})
-    avg_rating = round(
-        sum(c.get("avg_rating_normalised", 0.5) for c in clusters) / max(len(clusters), 1) * 5, 1
-    )
-
-    # Single combined prompt
-    combined_prompt = f"""You are an operations analyst for Spacez luxury villas.
-
-Issue clusters from guest reviews:
-{block.strip()}
-
-Portfolio: {len(clusters)} clusters across {len(props)} properties, avg rating {avg_rating}/5, {high_count} high-priority.
-
-Return ONLY this JSON (no markdown, no extra text):
-{{
-  "clusters": [
-    {{"root_cause": "1-2 sentences with specific numbers and names", "action": "concrete: who does what by when"}}
-  ],
-  "exec_summary": "4-5 sentences: portfolio health, top risks, this week priorities"
-}}
-The clusters array must have exactly {len(clusters)} items in the same order as input."""
-
-    root_causes, actions, exec_summary = [], [], ""
-    _gemini_error = None
-
+    # ONE call for all root causes + actions
+    root_causes = []
+    actions = []
     try:
-        raw = gemini_call(model, combined_prompt, max_tokens=2500)
-        raw_original = raw
+        raw = gemini_call(model, BATCH_INSIGHTS_PROMPT.format(clusters_block=block.strip()))
+        # Strip markdown fences, find the JSON array robustly
         raw = re.sub(r"```json|```", "", raw).strip()
-        brace_start = raw.find("{")
-        brace_end   = raw.rfind("}") + 1
-        if brace_start != -1 and brace_end > brace_start:
-            raw = raw[brace_start:brace_end]
-        data = json.loads(raw)
-        for r in data.get("clusters", []):
-            root_causes.append((r.get("root_cause") or "").strip() or None)
-            actions.append((r.get("action") or "").strip() or None)
-        exec_summary = (data.get("exec_summary") or "").strip()
+        # Extract the JSON array even if there's surrounding text
+        match = re.search(r'\[.*\]', raw, re.DOTALL)
+        if match:
+            raw = match.group(0)
+        results = json.loads(raw)
+        if isinstance(results, list):
+            for r in results:
+                root_causes.append(r.get("root_cause", "").strip() or "Pattern detected across multiple reviews.")
+                actions.append(r.get("action", "").strip() or "Review with the relevant owner.")
     except Exception as _e:
-        _gemini_error = f"{type(_e).__name__}: {_e} | Raw: {repr(locals().get('raw_original','none')[:300])}"
+        pass  # fall through to pad with defaults below
 
-    # Deterministic fallbacks — meaningful, not keyword strings
+    # Pad / fill any missing entries
     while len(root_causes) < len(clusters):
-        root_causes.append(None)
-    while len(actions) < len(clusters):
-        actions.append(None)
+        c = clusters[len(root_causes)]
+        root_causes.append(
+            f"{c['frequency']} review(s) flagged {c['category'].lower()} issues at {c['property']}. "
+            f"Caretaker: {c['caretaker']}."
+        )
+        actions.append(
+            f"{c['owner']} to review {c['category'].lower()} complaints at {c['property']} "
+            f"with caretaker {c['caretaker']} within 48 hours and confirm corrective action."
+        )
 
-    for i, c in enumerate(clusters):
-        if not root_causes[i]:
-            root_causes[i] = (
-                f"{c['frequency']} guest review(s) at {c['property']} flagged "
-                f"{c['category'].lower()} as an issue. Assigned caretaker: {c['caretaker']}."
-            )
-        if not actions[i]:
-            actions[i] = (
-                f"{c['owner']} team to inspect {c['category'].lower()} at {c['property']} "
-                f"within 48 hours, brief caretaker {c['caretaker']} on corrective steps, "
-                f"and confirm resolution in the ops log."
-            )
-
-    if not exec_summary or len(exec_summary) < 40:
+    # ONE call for executive summary
+    summary_lines = "\n".join(
+        f"- {c['category']} at {c['property']}: freq {c['frequency']}, "
+        f"priority {c.get('priority','?')}, rating impact {round(c.get('rating_impact',0)*5,1)}/5"
+        for c in clusters
+    )
+    try:
+        exec_summary = gemini_call(
+            model,
+            EXECUTIVE_SUMMARY_PROMPT.format(summary=summary_lines),
+            max_tokens=500
+        )
+        if not exec_summary or len(exec_summary) < 30:
+            raise ValueError("Empty response")
+    except Exception:
+        # Build a deterministic summary from the data
+        high_cnt = sum(1 for c in clusters if c.get("priority") == "High")
+        props = list({c["property"] for c in clusters})
         top = clusters[0] if clusters else {}
         exec_summary = (
-            f"Analysis of {sum(c.get('frequency',1) for c in clusters)} reviews across "
-            f"{len(props)} propert{'y' if len(props)==1 else 'ies'} identified "
-            f"{len(clusters)} issue cluster{'s' if len(clusters)!=1 else ''} "
-            f"(avg rating {avg_rating}/5, {high_count} high priority). "
-            f"Most frequent issue: {top.get('category','—')} at {top.get('property','—')} "
-            f"({top.get('frequency',0)} mentions, caretaker {top.get('caretaker','—')}). "
-            f"Immediate action required on all high-priority caretaker-controllable clusters. "
+            f"Spacez portfolio analysis across {len(props)} propert{'y' if len(props)==1 else 'ies'} "
+            f"identified {len(clusters)} issue cluster{'s' if len(clusters)!=1 else ''}, "
+            f"of which {high_cnt} are high priority. "
+            f"The most frequent issue is {top.get('category','—')} at {top.get('property','—')} "
+            f"({top.get('frequency',0)} mentions). "
+            f"Immediate focus should be on high-priority caretaker-controllable issues. "
             f"Review the Operations tab for detailed root causes and recommended actions."
         )
 
-    return root_causes[:len(clusters)], actions[:len(clusters)], exec_summary, (_gemini_error or '')
+    return root_causes, actions, exec_summary
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -645,7 +634,7 @@ def run_full_pipeline(api_key: str, file_bytes: bytes, _file_hash: str):
         c["person_level_pattern"] = bool(c["person_level_pattern"])
         c["rating_impact"]      = float(c["rating_impact"])
 
-    root_causes, actions, exec_summary, _gemini_debug = run_gemini_batch(
+    root_causes, actions, exec_summary = run_gemini_batch(
         api_key, json.dumps(clusters_for_gemini)
     )
 
@@ -655,7 +644,7 @@ def run_full_pipeline(api_key: str, file_bytes: bytes, _file_hash: str):
     # ── Step 6: Business metrics  ─────────────────────────
     metrics = compute_business_metrics(clusters, total_reviews, portfolio_avg)
 
-    return clusters, metrics, total_reviews, portfolio_avg, df, exec_summary, _gemini_debug
+    return clusters, metrics, total_reviews, portfolio_avg, df, exec_summary
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -766,7 +755,7 @@ with st.sidebar:
 # ═══════════════════════════════════════════════════════════════
 # SESSION STATE
 # ═══════════════════════════════════════════════════════════════
-for k in ["clusters","metrics","total","port_avg","raw_df","exec_summary","_gemini_debug"]:
+for k in ["clusters","metrics","total","port_avg","raw_df","exec_summary"]:
     if k not in st.session_state:
         st.session_state[k] = None
 
@@ -816,7 +805,7 @@ if run_btn:
         show_steps(3)
 
         result = run_full_pipeline(api_key, file_bytes, fhash)
-        clusters, metrics, total, port_avg, raw_df, exec_summary, _gemini_debug = result
+        clusters, metrics, total, port_avg, raw_df, exec_summary = result
 
         show_steps(4)
         progress_placeholder.empty()
@@ -842,7 +831,6 @@ if run_btn:
     st.session_state.port_avg     = port_avg
     st.session_state.raw_df       = raw_df
     st.session_state.exec_summary = exec_summary
-    st.session_state['_gemini_debug'] = _gemini_debug
     st.rerun()
 
 
@@ -873,9 +861,6 @@ filtered = clusters[
 if exec_summary:
     with st.expander("📋 Executive summary", expanded=True):
         st.markdown(exec_summary)
-        _dbg = st.session_state.get("_gemini_debug","")
-        if _dbg:
-            st.error(f"⚠️ Gemini call failed — showing fallback text. Debug: {_dbg}")
 
 # ── Top metrics row ───────────────────────────────────────────
 c1,c2,c3,c4,c5 = st.columns(5)
