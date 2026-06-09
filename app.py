@@ -3,7 +3,8 @@ import pandas as pd
 import json
 import re
 import plotly.graph_objects as go
-import google.generativeai as genai
+from google import genai
+from google.genai import types as genai_types
 
 # ── Page config ──────────────────────────────────────────────
 st.set_page_config(
@@ -76,14 +77,19 @@ OWNER_URGENCY  = {"Operations": 1.2, "Caretaker": 1.1, "Business": 1.0, "Vendor"
 
 # ── Gemini client helper ──────────────────────────────────────
 def get_model(api_key: str, model_name: str = "gemini-2.0-flash"):
-    genai.configure(api_key=api_key)
-    return genai.GenerativeModel(model_name)
+    client = genai.Client(api_key=api_key)
+    return client, model_name
 
 def gemini_call(model, prompt: str, max_tokens: int = 1000) -> str:
+    client, model_name = model
     try:
-        response = model.generate_content(
-            prompt,
-            generation_config=genai.GenerationConfig(max_output_tokens=max_tokens, temperature=0.2)
+        response = client.models.generate_content(
+            model=model_name,
+            contents=prompt,
+            config=genai_types.GenerateContentConfig(
+                max_output_tokens=max_tokens,
+                temperature=0.2,
+            ),
         )
         return response.text.strip()
     except Exception as e:
