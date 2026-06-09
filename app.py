@@ -177,18 +177,32 @@ def extract_issues_batch(rows: list, review_col: str, model) -> list:
             f"Caretaker: {row.get('caretaker', 'Unknown')} | "
             f"Platform: {row.get('platform', 'Unknown')} | "
             f"Rating: {round(float(row.get('normalised_rating', 0.5)), 2)}\n"
-            f"Review: {str(row[review_col])[:600]}\n\n"
+            f"Review: {str(row.get(review_col, row.get(review_col.lower(), 'No review')))[:600]}\n\n"
         )
     prompt = BATCH_EXTRACT_PROMPT.format(reviews_block=reviews_block.strip())
     try:
         raw = gemini_call(model, prompt, max_tokens=4000)
         raw = re.sub(r"```json|```", "", raw).strip()
+        # Handle case where Gemini wraps array in an object
+        if raw.startswith("{"):
+            import ast
+            # Try to find array inside
+            match = re.search(r'\[.*\]', raw, re.DOTALL)
+            if match:
+                raw = match.group(0)
         results = json.loads(raw)
-        if isinstance(results, list):
+        if isinstance(results, list) and len(results) == len(rows):
             return results
-        return [{"has_actionable_issue": False, "issues": []} for _ in rows]
+        # If count mismatch, still use what we got
+        if isinstance(results, list) and len(results) > 0:
+            # Pad or trim to match
+            while len(results) < len(rows):
+                results.append({"has_actionable_issue": False, "issues": []})
+            return results[:len(rows)]
+        return [{"has_actionable_issue": True, "issues": [{"category": "Other", "description": "Review requires attention", "severity": "Medium", "caretaker_controllable": True, "non_controllable_reason": "", "likely_cause": "See review text", "owner": "Operations"}]} for _ in rows]
     except Exception as e:
-        return [{"has_actionable_issue": False, "issues": [], "error": str(e)} for _ in rows]
+        # On parse failure, return a basic actionable result so reviews aren't silently dropped
+        return [{"has_actionable_issue": True, "issues": [{"category": "Other", "description": str(row.get(review_col, ""))[:100], "severity": "Medium", "caretaker_controllable": True, "non_controllable_reason": "", "likely_cause": "Parse error - review manually", "owner": "Unknown"}], "parse_error": str(e)} for row in rows]
 
 # ── Step 3: Pattern detection with evidence ───────────────────
 def detect_patterns(extracted: list) -> pd.DataFrame:
@@ -415,8 +429,7 @@ def generate_root_causes_and_actions_batch(clusters_df, model) -> tuple:
             for r in batch:
                 all_rc.append(r.get("likely_cause", "Pattern detected across multiple reviews."))
                 all_ac.append("Review and address the recurring issue with the relevant owner.")
-        if start + BATCH < len(rows):
-            _time.sleep(3)
+
     return all_rc, all_ac
 
 # ── Main pipeline ─────────────────────────────────────────────
@@ -435,7 +448,7 @@ def run_full_pipeline(_api_key: str, file_bytes: bytes, filename: str):
     portfolio_avg = df["normalised_rating"].dropna().mean()
 
     import time as _time
-    BATCH_SIZE = 8  # 8 reviews per call => ~6 calls for 50 reviews, well within free tier
+    BATCH_SIZE = 15  # 15 reviews per call => ~3-4 calls for 50 reviews
     rows_list = []
     for _, row in actionable.iterrows():
         r = row.to_dict()
@@ -449,13 +462,14 @@ def run_full_pipeline(_api_key: str, file_bytes: bytes, filename: str):
         batch = rows_list[batch_start: batch_start + BATCH_SIZE]
         results = extract_issues_batch(batch, review_col, model)
         for row, result in zip(batch, results):
-            result["review_text"]       = str(row[review_col])[:300]
+            # review_col key is already normalised (lowercase) in rows_list
+            review_text = str(row.get(review_col, row.get(review_col.lower(), "")))[:300]
+            result["review_text"]       = review_text
             result["property"]          = row["property"]
             result["caretaker"]         = row["caretaker"]
             result["normalised_rating"] = row["normalised_rating"]
             extracted.append(result)
-        if batch_start + BATCH_SIZE < len(rows_list):
-            _time.sleep(3)  # brief pause between batches
+
 
     issues_df = detect_patterns(extracted)
     if issues_df.empty:
