@@ -240,18 +240,26 @@ def run_gemini_batch(_model_key: str, clusters_json: str) -> tuple[list, list, s
     root_causes = []
     actions = []
     try:
-        raw = gemini_call(model, BATCH_INSIGHTS_PROMPT.format(clusters_block=block.strip()))
-		st.write("RAW GEMINI RESPONSE")
-		st.code(raw)
-        # Strip markdown fences, find the JSON array robustly
-        raw = re.sub(r"```json|```", "", raw).strip()
-        # Extract the JSON array even if there's surrounding text
-        match = re.search(r'\[.*\]', raw, re.DOTALL)
-        if match:
-            raw = match.group(0)
-	st.write("JSON BEING PARSED")
+        raw = gemini_call(
+    		model,
+    		BATCH_INSIGHTS_PROMPT.format(clusters_block=block.strip())
+	)
+
+	st.write("RAW GEMINI RESPONSE")
 	st.code(raw)
-        results = json.loads(raw)
+
+# Strip markdown fences
+raw = re.sub(r"```json|```", "", raw).strip()
+
+# Extract JSON array
+match = re.search(r"\[.*\]", raw, re.DOTALL)
+if match:
+    raw = match.group(0)
+
+st.write("JSON BEING PARSED")
+st.code(raw)
+
+results = json.loads(raw)
         if isinstance(results, list):
             for r in results:
                 root_causes.append(r.get("root_cause", "").strip() or "Pattern detected across multiple reviews.")
