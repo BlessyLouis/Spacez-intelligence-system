@@ -510,12 +510,24 @@ if run_btn:
     if not uploaded:
         st.error("Please upload a review Excel file before running analysis.")
         st.stop()
+    file_bytes_debug = uploaded.read()
     with st.spinner("Running analysis... this may take a minute."):
         clusters, metrics, total, port_avg, raw_df = run_full_pipeline(
-            api_key, uploaded.read(), uploaded.name
+            api_key, file_bytes_debug, uploaded.name
         )
     if clusters is None:
-        st.error("No actionable issues found. Check that the file has a review/comment/text column with content.")
+        import io as _io
+        _df = pd.read_excel(_io.BytesIO(file_bytes_debug))
+        _df.columns = [c.strip().lower().replace(" ", "_") for c in _df.columns]
+        review_col_found = next((c for c in _df.columns if any(k in c for k in ["review","comment","text","feedback"])), _df.columns[0])
+        col_data = _df[review_col_found].astype(str).replace("nan","").str.strip()
+        noise_count = ((col_data.str.len() < 15)).sum()
+        st.error(f"No actionable issues found in your file.")
+        st.write(f"**Columns in file:** `{list(_df.columns)}`")
+        st.write(f"**Review column detected:** `{review_col_found}`")
+        st.write(f"**Total rows:** {len(_df)} | **Filtered as noise (too short):** {noise_count} | **Remaining:** {len(_df) - noise_count}")
+        st.write("**Sample reviews:**")
+        st.dataframe(_df[[review_col_found]].head(5))
         st.stop()
     st.session_state.clusters = clusters
     st.session_state.metrics  = metrics
