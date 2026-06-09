@@ -111,7 +111,14 @@ def normalise_ratings(df: pd.DataFrame) -> pd.DataFrame:
 
 def detect_columns(df: pd.DataFrame):
     cols = df.columns.tolist()
-    review_col    = next((c for c in cols if any(k in c for k in ["review","comment","text","feedback"])), cols[0])
+    # Prefer exact/specific matches before falling back to partial keyword match
+    REVIEW_EXACT  = ["review_text", "comment_text", "review_body", "feedback_text"]
+    REVIEW_KEYWORDS = ["review_text", "comment", "feedback", "review_body", "text"]
+    review_col = (
+        next((c for c in cols if c in REVIEW_EXACT), None)
+        or next((c for c in cols if any(k in c for k in REVIEW_KEYWORDS) and "id" not in c), None)
+        or next((c for c in cols if any(k in c for k in ["review", "comment", "text", "feedback"])), cols[0])
+    )
     property_col  = next((c for c in cols if "property" in c), None)
     caretaker_col = next((c for c in cols if "caretaker" in c or "host" in c), None)
     return review_col, property_col, caretaker_col
