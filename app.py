@@ -367,7 +367,6 @@ def run_full_pipeline(_api_key: str, file_bytes: bytes, filename: str):
     portfolio_avg = df["normalised_rating"].dropna().mean()
 
     extracted = []
-    progress  = st.progress(0, text="Extracting issues from reviews…")
     for i, row in actionable.iterrows():
         result = extract_issues(row, review_col, model)
         result["review_text"]       = str(row[review_col])[:300]
@@ -375,11 +374,9 @@ def run_full_pipeline(_api_key: str, file_bytes: bytes, filename: str):
         result["caretaker"]         = str(row.get(caretaker_col, "Unknown")) if caretaker_col else "Unknown"
         result["normalised_rating"] = float(row.get("normalised_rating", 0.5))
         extracted.append(result)
-        progress.progress(int((i+1) / len(actionable) * 60), text=f"Extracting issues… {i+1}/{len(actionable)}")
 
     issues_df = detect_patterns(extracted)
     if issues_df.empty:
-        progress.empty()
         return None, None, total_reviews, portfolio_avg, df
 
     clusters = (
@@ -396,9 +393,7 @@ def run_full_pipeline(_api_key: str, file_bytes: bytes, filename: str):
     clusters["confidence"]      = clusters.apply(lambda r: compute_confidence(r, total_reviews), axis=1)
 
     root_causes, actions = [], []
-    total_clusters = len(clusters)
     for idx, row in clusters.iterrows():
-        progress.progress(60 + int((idx+1) / total_clusters * 40), text=f"Generating root causes & actions… {idx+1}/{total_clusters}")
         rc = generate_root_cause(row.to_dict(), model)
         ac = generate_action({
             "category": row["category"], "property": row["property"],
@@ -412,7 +407,6 @@ def run_full_pipeline(_api_key: str, file_bytes: bytes, filename: str):
 
     clusters["root_cause"]            = root_causes
     clusters["action_recommendation"] = actions
-    progress.empty()
 
     metrics = compute_business_metrics(clusters, total_reviews, portfolio_avg)
     return clusters, metrics, total_reviews, portfolio_avg, df
@@ -511,19 +505,24 @@ for key in ["clusters","metrics","total","port_avg","raw_df"]:
 
 if run_btn:
     if not api_key:
-        st.error("GEMINI_API_KEY not found. Add it in Streamlit Cloud → Settings → Secrets.")
+        st.error("GEMINI_API_KEY not found. Go to Streamlit Cloud > App settings > Secrets and add it.")
         st.stop()
     if not uploaded:
-        st.error("Please upload a review Excel file.")
+        st.error("Please upload a review Excel file before running analysis.")
         st.stop()
-    clusters, metrics, total, port_avg, raw_df = run_full_pipeline(
-        api_key, uploaded.read(), uploaded.name
-    )
+    with st.spinner("Running analysis... this may take a minute."):
+        clusters, metrics, total, port_avg, raw_df = run_full_pipeline(
+            api_key, uploaded.read(), uploaded.name
+        )
+    if clusters is None:
+        st.error("No actionable issues found. Check that the file has a review/comment/text column with content.")
+        st.stop()
     st.session_state.clusters = clusters
     st.session_state.metrics  = metrics
     st.session_state.total    = total
     st.session_state.port_avg = port_avg
     st.session_state.raw_df   = raw_df
+    st.rerun()
 
 # ── MAIN CONTENT ───────────────────────────────────────────────
 st.markdown("# Review Intelligence")
