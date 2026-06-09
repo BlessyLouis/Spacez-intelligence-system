@@ -237,19 +237,35 @@ def run_gemini_batch(_model_key: str, clusters_json: str) -> tuple[list, list, s
         )
 
     # ONE call for all root causes + actions
+    root_causes = []
+    actions = []
     try:
         raw = gemini_call(model, BATCH_INSIGHTS_PROMPT.format(clusters_block=block.strip()))
+        # Strip markdown fences, find the JSON array robustly
         raw = re.sub(r"```json|```", "", raw).strip()
+        # Extract the JSON array even if there's surrounding text
+        match = re.search(r'\[.*\]', raw, re.DOTALL)
+        if match:
+            raw = match.group(0)
         results = json.loads(raw)
-        root_causes = [r.get("root_cause", "Pattern detected.") for r in results]
-        actions     = [r.get("action", "Review with relevant owner.") for r in results]
-        # Pad if Gemini returned fewer items
-        while len(root_causes) < len(clusters):
-            root_causes.append("Pattern detected across multiple reviews.")
-            actions.append("Review recurring issue with relevant owner.")
-    except Exception:
-        root_causes = [c.get("likely_cause", "Pattern detected.") for c in clusters]
-        actions     = ["Review recurring issue with relevant owner." for _ in clusters]
+        if isinstance(results, list):
+            for r in results:
+                root_causes.append(r.get("root_cause", "").strip() or "Pattern detected across multiple reviews.")
+                actions.append(r.get("action", "").strip() or "Review with the relevant owner.")
+    except Exception as _e:
+        pass  # fall through to pad with defaults below
+
+    # Pad / fill any missing entries
+    while len(root_causes) < len(clusters):
+        c = clusters[len(root_causes)]
+        root_causes.append(
+            f"{c['frequency']} review(s) flagged {c['category'].lower()} issues at {c['property']}. "
+            f"Caretaker: {c['caretaker']}."
+        )
+        actions.append(
+            f"{c['owner']} to review {c['category'].lower()} complaints at {c['property']} "
+            f"with caretaker {c['caretaker']} within 48 hours and confirm corrective action."
+        )
 
     # ONE call for executive summary
     summary_lines = "\n".join(
@@ -261,10 +277,24 @@ def run_gemini_batch(_model_key: str, clusters_json: str) -> tuple[list, list, s
         exec_summary = gemini_call(
             model,
             EXECUTIVE_SUMMARY_PROMPT.format(summary=summary_lines),
-            max_tokens=400
+            max_tokens=500
         )
+        if not exec_summary or len(exec_summary) < 30:
+            raise ValueError("Empty response")
     except Exception:
-        exec_summary = "Executive summary unavailable."
+        # Build a deterministic summary from the data
+        high_cnt = sum(1 for c in clusters if c.get("priority") == "High")
+        props = list({c["property"] for c in clusters})
+        top = clusters[0] if clusters else {}
+        exec_summary = (
+            f"Spacez portfolio analysis across {len(props)} propert{'y' if len(props)==1 else 'ies'} "
+            f"identified {len(clusters)} issue cluster{'s' if len(clusters)!=1 else ''}, "
+            f"of which {high_cnt} are high priority. "
+            f"The most frequent issue is {top.get('category','—')} at {top.get('property','—')} "
+            f"({top.get('frequency',0)} mentions). "
+            f"Immediate focus should be on high-priority caretaker-controllable issues. "
+            f"Review the Operations tab for detailed root causes and recommended actions."
+        )
 
     return root_causes, actions, exec_summary
 
