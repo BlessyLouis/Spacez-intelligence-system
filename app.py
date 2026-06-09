@@ -80,18 +80,27 @@ def get_model(api_key: str, model_name: str = "gemini-2.0-flash"):
     return genai.GenerativeModel(model_name)
 
 def gemini_call(model, prompt: str, max_tokens: int = 1000) -> str:
-    try:
-        response = model.generate_content(
-            prompt,
-            generation_config=genai.GenerationConfig(max_output_tokens=max_tokens, temperature=0.2)
-        )
-        return response.text.strip()
-    except Exception as e:
-        err = str(e)
-        if "403" in err or "API_KEY_INVALID" in err or "permission" in err.lower():
-            st.error(f"Gemini API key error (403): {err}\n\nCheck your GEMINI_API_KEY secret is correct and the Gemini API is enabled at console.cloud.google.com")
-            st.stop()
-        raise
+    import time
+    last_err = None
+    for attempt in range(6):
+        try:
+            response = model.generate_content(
+                prompt,
+                generation_config=genai.GenerationConfig(max_output_tokens=max_tokens, temperature=0.2)
+            )
+            return response.text.strip()
+        except Exception as e:
+            err = str(e)
+            if "API_KEY_INVALID" in err or ("403" in err and "quota" not in err.lower()):
+                st.error(f"Gemini API key error: {err}")
+                st.stop()
+            if "429" in err or "quota" in err.lower() or "rate" in err.lower():
+                wait = 15 * (attempt + 1)
+                time.sleep(wait)
+                last_err = e
+                continue
+            raise
+    raise last_err
 
 # ── Step 1: Load & normalise ──────────────────────────────────
 def load_reviews(uploaded_file) -> pd.DataFrame:
@@ -373,6 +382,7 @@ def run_full_pipeline(_api_key: str, file_bytes: bytes, filename: str):
     total_reviews = len(df)
     portfolio_avg = df["normalised_rating"].dropna().mean()
 
+    import time as _time
     extracted = []
     for i, row in actionable.iterrows():
         result = extract_issues(row, review_col, model)
@@ -381,6 +391,7 @@ def run_full_pipeline(_api_key: str, file_bytes: bytes, filename: str):
         result["caretaker"]         = str(row.get(caretaker_col, "Unknown")) if caretaker_col else "Unknown"
         result["normalised_rating"] = float(row.get("normalised_rating", 0.5))
         extracted.append(result)
+        _time.sleep(1.5)  # stay within free tier rate limits
 
     issues_df = detect_patterns(extracted)
     if issues_df.empty:
